@@ -7,10 +7,6 @@ on:
         description: 'Target URL (overrides TARGET_URL secret / env)'
         required: false
         default: ''
-      run_note:
-        description: 'Optional note for this run'
-        required: false
-        default: ''
       fail_high_threshold:
         description: 'Fail if ZAP High alerts >= (default 3)'
         required: false
@@ -57,28 +53,26 @@ jobs:
         uses: zaproxy/action-baseline@v0.14.0
         with:
           target: ${{ steps.vars.outputs.target }}
-          output: zap_report
-          format: html,json
+          artifact_name: zap_report
+          allow_issue_writing: 'false'       # avoid trying to create issues (permission error)
+          fail_action: 'warn'                # optional: do not fail the job on scan alerts
         continue-on-error: true
 
-      - name: Save ZAP reports with timestamp
+      - name: Collect any generated report files into scan-results
         if: always()
         run: |
-          TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-          mkdir -p $OUTDIR
-          if [ -f zap_report.html ]; then
-            mv zap_report.html "$OUTDIR/zap_report_${TIMESTAMP}.html"
-            echo "Saved $OUTDIR/zap_report_${TIMESTAMP}.html"
-          else
-            echo "No zap_report.html found"
-          fi
-          if [ -f zap_report.json ]; then
-            mv zap_report.json "$OUTDIR/zap_report_${TIMESTAMP}.json"
-            echo "Saved $OUTDIR/zap_report_${TIMESTAMP}.json"
-          else
-            echo "No zap_report.json found"
-          fi
-          ls -la $OUTDIR || true
+          set -euo pipefail
+          mkdir -p scan-results
+          # find any plausible ZAP outputs (html/json) produced by the action (search depth 3)
+          find . -maxdepth 3 -type f \( -iname '*zap*report*.html' -o -iname '*zap*report*.json' -o -iname '*.html' -o -iname '*.json' \) -print > /tmp/zap_files.txt || true
+          echo "Files discovered by find:"
+          cat /tmp/zap_files.txt || true
+          # copy discovered files into scan-results
+          while IFS= read -r f; do
+            cp -v "$f" scan-results/ || true
+          done < /tmp/zap_files.txt || true
+          echo "Contents of scan-results:"
+          ls -la scan-results || true
 
       - name: Upload scan results artifact
         uses: actions/upload-artifact@v4
@@ -90,7 +84,7 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          ZAP_JSON=$(ls -1 scan-results/*zap_report_*.json 2>/dev/null | tail -n1 || true)
+          ZAP_JSON=$(ls -1 scan-results/*.json 2>/dev/null | tail -n1 || true)
           if [ -z "$ZAP_JSON" ]; then
             echo "No ZAP JSON report found in scan-results. Skipping threshold check."
             exit 0
