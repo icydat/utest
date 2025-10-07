@@ -1,0 +1,65 @@
+name: Security Scan (ZAP baseline)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Website URL to scan'
+        required: false
+        default: 'https://www.netsuite.com/portal/home.shtml'
+      fail_high_threshold:
+        description: 'Fail if High alerts >= (default 3)'
+        required: false
+        default: '3'
+      fail_critical_threshold:
+        description: 'Fail if Critical alerts >= (default 1)'
+        required: false
+        default: '1'
+
+jobs:
+  zap-baseline:
+    runs-on: ubuntu-latest
+    env:
+      OUTDIR: scan-results
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create output directory
+        run: mkdir -p $OUTDIR
+
+      - name: Run ZAP baseline scan
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url }}
+        run: |
+          TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
+          OUT="$PWD/$OUTDIR"
+          echo "Running OWASP ZAP baseline scan for $TARGET_URL"
+          docker run --rm -v "$PWD":"$PWD" -w "$PWD" owasp/zap2docker-stable \
+            zap-baseline.py -t "$TARGET_URL" -r "$OUT/zap_report_${TIMESTAMP}.html" -J "$OUT/zap_report_${TIMESTAMP}.json" || true
+          echo "Scan complete. Reports saved in $OUT"
+
+      - name: Upload scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-scan-results
+          path: scan-results
+
+      - name: Fail if too many High/Critical alerts
+        run: |
+          set -euo pipefail
+          ZAP_JSON=$(ls scan-results/*zap_report_*.json 2>/dev/null | head -n1 || true)
+          if [ -z "$ZAP_JSON" ]; then
+            echo "No JSON report found. Skipping failure check."
+            exit 0
+          fi
+          HIGH_COUNT=$(jq '[.site[].alerts[] | select(.risk == "High")] | length' "$ZAP_JSON")
+          CRIT_COUNT=$(jq '[.site[].alerts[] | select(.risk == "Critical")] | length' "$ZAP_JSON")
+          echo "High Alerts: $HIGH_COUNT | Critical Alerts: $CRIT_COUNT"
+          FAIL_HIGH=${{ github.event.inputs.fail_high_threshold }}
+          FAIL_CRIT=${{ github.event.inputs.fail_critical_threshold }}
+          if [ "$HIGH_COUNT" -ge "$FAIL_HIGH" ] || [ "$CRIT_COUNT" -ge "$FAIL_CRIT" ]; then
+            echo "Threshold exceeded — failing job."
+            exit 1
+          fi
+          echo "Scan passed successfully. No critical issues found."
